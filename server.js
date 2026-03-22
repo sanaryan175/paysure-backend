@@ -15,10 +15,10 @@ connectDB();
 
 const app = express();
 
-app.use(cors({ origin: '*', credentials: false }));
+app.use(cors({ origin: 'https://paysure-frontend.vercel.app', credentials: false }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-
+app.get('/api/ping', (req, res) => res.json({ ok: true }));
 // Health check
 app.get('/api/health', (req, res) => {
   res.json({ success: true, message: 'PaySure API is running', timestamp: new Date().toISOString() });
