@@ -1,0 +1,23 @@
+# Dependencies
+node_modules/
+
+# Environment variables — NEVER push these
+.env
+.env.local
+.env.production
+
+# Uploads — temp files
+uploads/*
+!uploads/.gitkeep
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Tesseract trained data (large file)
+*.traineddata
+eng.traineddata
