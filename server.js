@@ -15,7 +15,28 @@ connectDB();
 
 const app = express();
 
-app.use(cors({ origin: 'https://paysure-frontend.vercel.app', credentials: false }));
+const defaultOrigins = [
+  'https://paysure-frontend.vercel.app',
+  'http://localhost:5173',
+  'http://127.0.0.1:5173',
+];
+const allowedOrigins = process.env.CLIENT_ORIGIN
+  ? process.env.CLIENT_ORIGIN.split(',').map((s) => s.trim()).filter(Boolean)
+  : defaultOrigins;
+
+function corsOrigin(origin, callback) {
+  if (!origin) return callback(null, true);
+  if (allowedOrigins.includes(origin)) return callback(null, true);
+  try {
+    const host = new URL(origin).hostname;
+    if (host.endsWith('.vercel.app')) return callback(null, true);
+  } catch {
+    /* ignore */
+  }
+  return callback(null, false);
+}
+
+app.use(cors({ origin: corsOrigin, credentials: false }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.get('/api/ping', (req, res) => res.json({ ok: true }));
@@ -31,6 +52,14 @@ app.use('/api/auth', authRoutes);
 app.use('/api/loan-risk',  protect, loanRiskRoutes);
 app.use('/api/scam-check', protect, scamCheckRoutes);
 app.use('/api/agreement',  protect, agreementRoutes);
+
+app.get('/', (req, res) => {
+  res.json({
+    success: true,
+    name: 'PaySure API',
+    message: 'API is running. Use routes under /api (e.g. GET /api/health).',
+  });
+});
 
 // 404
 app.use((req, res) => {
