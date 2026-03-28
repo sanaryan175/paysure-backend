@@ -16,7 +16,9 @@ const computeMetrics = ({ monthlyIncome, monthlyExpenses, existingEMIs, savings,
   const hasLoanData = loanAmount && interestRate && tenureMonths;
   const calculatedEMI          = hasLoanData ? calculateEMI(loanAmount, interestRate, tenureMonths) : 0;
   const totalDebtBurden        = parseFloat(((existingEMIs || 0) + calculatedEMI).toFixed(2));
-  const emiToIncomeRatio       = calculatedEMI > 0 ? parseFloat(((totalDebtBurden / monthlyIncome) * 100).toFixed(2)) : 0;
+  const emiToIncomeRatio       = monthlyIncome > 0
+    ? parseFloat(((totalDebtBurden / monthlyIncome) * 100).toFixed(2))
+    : 0;
   const disposableIncome       = parseFloat((monthlyIncome - monthlyExpenses - totalDebtBurden).toFixed(2));
   const totalRepayment         = hasLoanData ? parseFloat((calculatedEMI * tenureMonths).toFixed(2)) : 0;
   const totalInterest          = hasLoanData ? parseFloat((totalRepayment - loanAmount).toFixed(2)) : 0;
@@ -107,6 +109,16 @@ Always prioritize the user's financial safety. Use actual ₹ amounts and percen
 NEVER give vague generic advice. Every statement must be specific and actionable.
 Think like: "Would I recommend my own family member take this loan?"`;
 
+/** Merge form loan fields with NLP guesses from the document when the user skipped entry. */
+const resolveEffectiveLoan = (body, nlpResult) => {
+  const inf = nlpResult && !nlpResult.error ? nlpResult.loanInference : null;
+  const effLoanAmount = body.loanAmount ?? inf?.principalAmount;
+  const effInterestRate = body.interestRate ?? inf?.interestRatePercent;
+  const effTenure = body.tenureMonths ?? inf?.tenureMonths;
+  const hasLoanData = !!(effLoanAmount && effInterestRate && effTenure);
+  return { effLoanAmount, effInterestRate, effTenure, hasLoanData, inf };
+};
+
 // ─── Main controller ──────────────────────────────────────────────────────────
 export const analyzeLoanRisk = async (req, res, next) => {
   const filePath = req.file?.path;
@@ -117,12 +129,72 @@ export const analyzeLoanRisk = async (req, res, next) => {
       savings, jobType, loanAmount, interestRate, tenureMonths,
     } = req.body;
 
-    // Step 1: Calculations
+    let extractedText = '';
+    let nlpResult = null;
+    let documentUploaded = false;
+    let originalFileName = null;
+    let documentResult = null;
+
+    // Step 1 — Extract document + NLP first so we can infer loan figures before capacity analysis
+    if (req.file) {
+      try {
+        extractedText = await extractTextFromFile(filePath);
+        documentUploaded = true;
+        originalFileName = req.file.originalname;
+        nlpResult = analyzeDocumentWithNLP(extractedText);
+        if (nlpResult.error) {
+          console.warn('[NLP]', nlpResult.error);
+        } else {
+          console.log(`[NLP] Flags: ${nlpResult.totalFlagCount} | Pre-risk: ${nlpResult.nlpRiskLevel}`);
+        }
+      } catch (docErr) {
+        console.error('[Doc Error]', docErr.message);
+        if (filePath) deleteFile(filePath);
+        documentUploaded = false;
+        extractedText = '';
+        nlpResult = null;
+      }
+    }
+
+    const { effLoanAmount, effInterestRate, effTenure, hasLoanData, inf } = resolveEffectiveLoan(
+      { loanAmount, interestRate, tenureMonths },
+      nlpResult
+    );
+    const loanMetricsAvailable = hasLoanData;
+
+    const inferenceBits = [];
+    if (inf && !loanAmount && inf.principalAmount) inferenceBits.push('loan amount from document');
+    if (inf && !interestRate && inf.interestRatePercent != null) inferenceBits.push('interest rate from document');
+    if (inf && !tenureMonths && inf.tenureMonths) inferenceBits.push('tenure from document');
+
+    // Step 2 — Calculations (uses inferred loan figures when the user skipped manual entry)
     const metrics = computeMetrics({
       monthlyIncome, monthlyExpenses,
       existingEMIs: existingEMIs || 0,
-      savings, loanAmount, interestRate, tenureMonths,
+      savings,
+      loanAmount: effLoanAmount,
+      interestRate: effInterestRate,
+      tenureMonths: effTenure,
     });
+
+    const loanDetailsLines = loanMetricsAvailable
+      ? `- Loan Amount:            ₹${effLoanAmount}
+- Interest Rate:          ${effInterestRate}% per annum
+- Tenure:                 ${effTenure} months
+- Source:                 ${inferenceBits.length ? `mixed (you entered some fields; we filled: ${inferenceBits.join(', ')})` : 'your entered values'}`
+      : `- Loan Amount:            ${effLoanAmount != null ? `₹${effLoanAmount}` : 'not specified'}
+- Interest Rate:          ${effInterestRate != null ? `${effInterestRate}% per annum` : 'not specified'}
+- Tenure:                 ${effTenure != null ? `${effTenure} months` : 'not specified'}
+- Note:                   Incomplete — new-loan EMI cannot be calculated until amount, rate, and tenure are all known (enter manually or use a clearer document).`;
+
+    const capacityConstraint = !loanMetricsAvailable
+      ? `
+
+CRITICAL — LOAN SIMULATION INCOMPLETE:
+The user skipped loan fields and we could not infer a full principal + rate + tenure from the document. "New Monthly EMI" below is NOT a real loan payment — it is ₹0 because the loan is undefined.
+Do NOT say they have "no EMI" or "zero burden" for the loan they are considering. Explain general income/expense resilience only, and say that affordability of the actual loan is unknown until they provide or confirm amount, rate, and tenure.
+If contract terms were analyzed separately and look risky, you may still warn about document risk without contradicting this.`
+      : '';
 
     const financialContext = `
 USER FINANCIAL PROFILE:
@@ -132,22 +204,20 @@ USER FINANCIAL PROFILE:
 - Savings:                ₹${savings}
 - Job Type:               ${jobType}
 
-LOAN DETAILS:
-- Loan Amount:            ₹${loanAmount}
-- Interest Rate:          ${interestRate}% per annum
-- Tenure:                 ${tenureMonths} months
+LOAN DETAILS (effective for this analysis):
+${loanDetailsLines}
 
 CALCULATED METRICS:
-- New Monthly EMI:        ₹${metrics.calculatedEMI}
-- Total Debt Burden:      ₹${metrics.totalDebtBurden}
-- EMI-to-Income Ratio:    ${metrics.emiToIncomeRatio}%  (Safe<30%, Risky 30-50%, Dangerous>50%)
+- New Monthly EMI:        ₹${metrics.calculatedEMI} ${!loanMetricsAvailable ? '(no new loan defined — not a real EMI)' : ''}
+- Total Debt Burden:      ₹${metrics.totalDebtBurden} (existing EMIs + new loan EMI if defined)
+- Debt-to-Income Ratio:   ${metrics.emiToIncomeRatio}%  (Safe<30%, Risky 30-50%, Dangerous>50%)
 - Disposable Income:      ₹${metrics.disposableIncome} after all costs
 - Emergency Buffer:       ${metrics.emergencyBufferMonths} months (Weak<3, Okay 3-6, Strong>6)
 - Monthly Savings Left:   ₹${metrics.monthlySavingsAfterLoan}
 - Total Repayment:        ₹${metrics.totalRepayment}
-- Total Interest Cost:    ₹${metrics.totalInterest}`;
+- Total Interest Cost:    ₹${metrics.totalInterest}${capacityConstraint}`;
 
-    // Step 2: Engine 1 — Capacity analysis
+    // Step 3 — Engine 1 — Capacity analysis
     const capacityResult = await structuredAnalysis({
       schemaName:   'capacity_analysis',
       schema:        capacitySchema,
@@ -160,10 +230,12 @@ For finalDecisionStatement:
 - Combine affordability + context into ONE clear action-oriented sentence
 - Example: "You can afford this loan, but your thin savings buffer makes it risky — only proceed if you have a stable income guarantee."
 - NOT: "Needs Caution" (too vague)
+${!loanMetricsAvailable ? '- If loan is undefined: say affordability of *that* loan cannot be judged yet; do not praise "zero EMI".' : ''}
 
 For impactStatement:
 - Explain what the number MEANS
 - Example: "After paying EMI, you will have ₹${metrics.disposableIncome?.toLocaleString('en-IN')} left monthly — ${metrics.emiToIncomeRatio < 30 ? 'indicating low financial stress.' : metrics.emiToIncomeRatio < 50 ? 'which is tight but manageable.' : 'which puts you under severe financial pressure.'}"
+${!loanMetricsAvailable ? '- Focus on disposable income after existing obligations; clarify that the new loan EMI is unknown.' : ''}
 
 For whatCanGoWrong:
 - List 3 real scenarios specific to THIS user's numbers
@@ -171,23 +243,9 @@ For whatCanGoWrong:
 - Make them feel real and specific, not generic`,
     });
 
-    let documentResult = null;
-    let nlpResult = null;
-    let documentUploaded = false;
-    let originalFileName = null;
-
-    // Step 3: Engine 2 — NLP + Document analysis
-    if (req.file) {
+    // Step 4 — Engine 2 — Groq document analysis (text already extracted)
+    if (documentUploaded && extractedText.length >= 50) {
       try {
-        const extractedText = await extractTextFromFile(filePath);
-        documentUploaded = true;
-        originalFileName = req.file.originalname;
-
-        // NLP pre-analysis
-        nlpResult = analyzeDocumentWithNLP(extractedText);
-        console.log(`[NLP] Flags: ${nlpResult.totalFlagCount} | Pre-risk: ${nlpResult.nlpRiskLevel}`);
-
-        // Groq document analysis with NLP context
         documentResult = await structuredAnalysis({
           schemaName:   'document_analysis',
           schema:        documentSchema,
@@ -196,7 +254,7 @@ For whatCanGoWrong:
 
 Document: ${originalFileName}
 
-${nlpResult.nlpSummary}
+${nlpResult?.nlpSummary || ''}
 
 DOCUMENT CONTENT:
 ${extractedText.slice(0, 6000)}
@@ -209,8 +267,7 @@ Example: "Prepayment before 12 months will cost 3% of outstanding amount"
 Be specific. Quote actual terms found in the document.`,
         });
 
-        // Merge NLP flags
-        if (nlpResult.flags.hardRedFlags.length > 0) {
+        if (nlpResult?.flags?.hardRedFlags?.length > 0) {
           const existing = documentResult.hardRedFlags || [];
           nlpResult.flags.hardRedFlags.forEach(flag => {
             if (!existing.some(e => e.toLowerCase().includes(flag.toLowerCase()))) {
@@ -220,41 +277,51 @@ Be specific. Quote actual terms found in the document.`,
           documentResult.hardRedFlags = existing;
         }
 
-        // Use NLP extracted values as fallback
         if (!documentResult.interestRateFound || documentResult.interestRateFound === 'Not specified') {
-          if (nlpResult.extracted.interestRate) documentResult.interestRateFound = nlpResult.extracted.interestRate;
+          if (nlpResult?.extracted?.interestRate) documentResult.interestRateFound = nlpResult.extracted.interestRate;
         }
         if (!documentResult.processingFee || documentResult.processingFee === 'Not specified') {
-          if (nlpResult.extracted.processingFee) documentResult.processingFee = nlpResult.extracted.processingFee;
+          if (nlpResult?.extracted?.processingFee) documentResult.processingFee = nlpResult.extracted.processingFee;
         }
-
-        deleteFile(filePath);
-      } catch (docErr) {
-        console.error('[Doc Error]', docErr.message);
-        if (filePath) deleteFile(filePath);
+      } catch (groqDocErr) {
+        console.error('[Doc Groq Error]', groqDocErr.message);
       }
+      if (filePath) deleteFile(filePath);
+    } else if (filePath) {
+      deleteFile(filePath);
     }
 
-    // Step 4: Decision matrix
+    // Step 5: Decision matrix
     const fairnessScore  = documentResult?.loanFairnessScore ?? 'Not Analyzed';
     const overallVerdict = getVerdictFromMatrix(capacityResult.capacityScore, fairnessScore);
 
-    // Step 5: Combine whatCanGoWrong from capacity + document consequences
+    const loanInferenceNote = loanMetricsAvailable
+      ? (inferenceBits.length ? `Some values were filled from your document: ${inferenceBits.join(', ')}.` : null)
+      : (documentUploaded
+        ? 'We could not derive a full loan (principal, rate, and tenure) from your upload. EMI and repayment totals for the new loan are not calculated until those are known — add them manually or use a clearer document.'
+        : null);
+
+    // Step 6: Combine whatCanGoWrong from capacity + document consequences
     const combinedWhatCanGoWrong = [
       ...(capacityResult.whatCanGoWrong || []),
       ...(documentResult?.documentConsequences || []),
     ];
 
-    // Step 6: Save
+    // Step 7: Save
     const record = await LoanAnalysis.create({
       monthlyIncome, monthlyExpenses,
       existingEMIs: existingEMIs || 0,
-      savings, jobType, loanAmount, interestRate, tenureMonths,
+      savings, jobType,
+      loanAmount: effLoanAmount ?? null,
+      interestRate: effInterestRate ?? null,
+      tenureMonths: effTenure ?? null,
       ...metrics,
       documentUploaded, originalFileName,
       capacityScore:         capacityResult.capacityScore,
       financialStressLevel:  capacityResult.financialStressLevel,
       emergencyBufferStatus: capacityResult.emergencyBufferStatus,
+      finalDecisionStatement: capacityResult.finalDecisionStatement,
+      whatCanGoWrong:         combinedWhatCanGoWrong,
       loanFairnessScore:     fairnessScore,
       interestRateFound:     documentResult?.interestRateFound  ?? null,
       processingFee:         documentResult?.processingFee      ?? null,
@@ -269,14 +336,19 @@ Be specific. Quote actual terms found in the document.`,
       suggestions:           capacityResult.suggestions,
     });
 
-    // Step 7: Respond
+    // Step 8: Respond
     res.status(200).json({
       success: true,
       data: {
         id: record._id,
         monthlyIncome, monthlyExpenses,
         existingEMIs: existingEMIs || 0,
-        savings, jobType, loanAmount, interestRate, tenureMonths,
+        savings, jobType,
+        loanAmount: effLoanAmount ?? null,
+        interestRate: effInterestRate ?? null,
+        tenureMonths: effTenure ?? null,
+        loanMetricsAvailable,
+        loanInferenceNote,
         ...metrics,
         documentUploaded, originalFileName,
         nlpFlagsFound: nlpResult?.totalFlagCount ?? 0,
@@ -296,7 +368,6 @@ Be specific. Quote actual terms found in the document.`,
         softSignals:            documentResult?.softSignals        ?? [],
         overallVerdict,
         overallSummary:         capacityResult.overallSummary,
-        impactStatement:        capacityResult.impactStatement,
         keyReasons:             capacityResult.keyReasons,
         suggestions:            capacityResult.suggestions,
       },

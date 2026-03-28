@@ -9,27 +9,27 @@ const loanAnalysisSchema = new mongoose.Schema(
     savings:          { type: Number, required: true },
     jobType:          { type: String, enum: ['salaried', 'self-employed', 'freelance', 'student', 'other'], required: true },
 
-    // ── Loan inputs ───────────────────────────────────────
+    // ── Loan inputs — optional (may come from doc) ────────
     loanAmount:       { type: Number, default: null },
     interestRate:     { type: Number, default: null },
     tenureMonths:     { type: Number, default: null },
 
-    // ── Calculated metrics ────────────────────────────────
-    calculatedEMI:            { type: Number, required: true },
-    emiToIncomeRatio:         { type: Number, required: true },
-    disposableIncome:         { type: Number, required: true },
-    totalDebtBurden:          { type: Number, required: true },
-    totalRepayment:           { type: Number, required: true },
-    totalInterest:            { type: Number, required: true },
-    emergencyBufferMonths:    { type: Number, required: true },
-    monthlySavingsAfterLoan:  { type: Number, required: true },
+    // ── Calculated metrics — default 0 if no loan data ───
+    calculatedEMI:            { type: Number, default: 0 },
+    emiToIncomeRatio:         { type: Number, default: 0 },
+    disposableIncome:         { type: Number, default: 0 },
+    totalDebtBurden:          { type: Number, default: 0 },
+    totalRepayment:           { type: Number, default: 0 },
+    totalInterest:            { type: Number, default: 0 },
+    emergencyBufferMonths:    { type: Number, default: 0 },
+    monthlySavingsAfterLoan:  { type: Number, default: 0 },
 
     // ── Engine 1 — AI output ──────────────────────────────
-    capacityScore:            { type: String, enum: ['Strong', 'Moderate', 'Low'],          required: true },
-    financialStressLevel:     { type: String, enum: ['Low', 'Medium', 'High'],              required: true },
+    capacityScore:            { type: String, enum: ['Strong', 'Moderate', 'Low'], required: true },
+    financialStressLevel:     { type: String, enum: ['Low', 'Medium', 'High'],     required: true },
     emergencyBufferStatus:    { type: String, enum: ['Strong', 'Okay', 'Weak', 'Critical'], required: true },
-    finalDecisionStatement:   { type: String },   // ← NEW: action-oriented verdict
-    whatCanGoWrong:           [{ type: String }], // ← NEW: real consequences
+    finalDecisionStatement:   { type: String, default: null },
+    whatCanGoWrong:           [{ type: String }],
 
     // ── Engine 2 — Document ───────────────────────────────
     documentUploaded:   { type: Boolean, default: false },
@@ -45,7 +45,7 @@ const loanAnalysisSchema = new mongoose.Schema(
     // ── Combined output ───────────────────────────────────
     overallVerdict:   { type: String, enum: ['Suitable', 'Needs Caution', 'High Risk'], required: true },
     overallSummary:   { type: String, required: true },
-    impactStatement:  { type: String },
+    impactStatement:  { type: String, default: null },
     keyReasons:       [{ type: String }],
     suggestions:      [{ type: String }],
   },

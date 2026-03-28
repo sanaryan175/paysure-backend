@@ -189,7 +189,25 @@ export const analyzeDocumentWithNLP = (rawText) => {
     }
   }
 
+  // Best-effort loan figures when the user skipped manual entry (used before capacity analysis)
+  const principalGuess = (() => {
+    if (amounts.length === 0) return null;
+    const sizable = amounts.filter((a) => a.value >= 10000);
+    const pool = sizable.length ? sizable : amounts;
+    const maxVal = Math.max(...pool.map((a) => a.value));
+    return maxVal >= 5000 ? maxVal : null;
+  })();
+  const tenureMonthsGuess = tenureMentions.length ? tenureMentions[0].months : null;
+
+  const loanInference = {
+    principalAmount: principalGuess,
+    interestRatePercent: interestRate ? interestRate.value : null,
+    tenureMonths: tenureMonthsGuess,
+  };
+
   return {
+    loanInference,
+
     // Extracted values
     extracted: {
       interestRate:   interestRate  ? `${interestRate.raw} (${interestRate.value}%)` : null,
